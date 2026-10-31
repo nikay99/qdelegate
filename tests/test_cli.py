@@ -63,7 +63,7 @@ class Server(BaseHTTPRequestHandler):
 TEST_CMD = "grep -q fixed file.txt"
 
 
-class CliTest(unittest.TestCase):
+class CliBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.srv = HTTPServer(("127.0.0.1", 0), Server)
@@ -110,6 +110,8 @@ class CliTest(unittest.TestCase):
         return subprocess.run(["git", "-C", self.repo, "branch", "--list", "qdelegate/*", "--format=%(refname:short)"],
                               capture_output=True, text=True).stdout.strip()
 
+
+class CliTest(CliBase):
     def test_green_run_commits_on_branch_only(self):
         r = self.cli("fix", self.repo, "fix it", "--test", TEST_CMD)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -282,6 +284,36 @@ class DelegateCmdTest(unittest.TestCase):
         for cmd in ("qdelegate stats", "qdelegate clean r b", "qdelegate --version", "cd ~/code/qdelegate && ls", "grep qdelegate file",
                     "git -C r merge qdelegate/x"):
             self.assertFalse(DELEGATE_CMD.search(cmd), cmd)
+
+
+class FancyTest(CliBase):
+    def run_fancy(self, script, *args):
+        return self.cli(script, *args, FORCE_COLOR="1")
+
+    def test_green_card_and_logo(self):
+        r = self.run_fancy("fix", self.repo, "fix it", "--test", TEST_CMD)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("\x1b[", r.stdout)
+        self.assertIn("Tests green", r.stdout)
+        self.assertIn("╭", r.stdout)
+        self.assertIn("merge", r.stdout)
+        self.assertIn("\x1b[38;5;", r.stderr)
+        self.assertIn("attempt 1/2", r.stderr)
+
+    def test_red_card(self):
+        r = self.run_fancy("ask", self.repo, "fix it", "--test", "false", "--retries", "0")
+        self.assertEqual(r.returncode, 6, r.stdout)
+        self.assertIn("changed nothing", r.stdout)
+
+    def test_no_color_wins(self):
+        r = self.cli("fix", self.repo, "fix it", "--test", TEST_CMD, FORCE_COLOR="1", NO_COLOR="1")
+        self.assertNotIn("\x1b[", r.stdout + r.stderr)
+        self.assertIn("GREEN", r.stdout)
+
+    def test_doctor_and_stats(self):
+        self.run_fancy("fix", self.repo, "fix it", "--test", TEST_CMD)
+        self.assertIn("Ready to delegate", self.run_fancy("fix", "doctor").stdout)
+        self.assertIn("1 green", self.run_fancy("fix", "stats").stdout)
 
 
 class ConfigTest(unittest.TestCase):

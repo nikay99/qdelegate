@@ -30,6 +30,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from . import __version__
+from .ui import Progress, Style, logo, report_card
 
 HOME = os.path.expanduser("~")
 DEFAULTS = {
@@ -134,11 +135,18 @@ def check_model(cfg, timeout=180):
 
 def doctor(cfg):
     ok = True
+    st = Style(sys.stdout)
+    if st.on:
+        print(logo(st, __version__))
 
     def line(good, label, detail=""):
         nonlocal ok
         ok = ok and good
-        print(f"{'ok  ' if good else 'FAIL'} {label}{': ' + detail if detail else ''}")
+        if st.on:
+            mark = st.green("✔") if good else st.red("✘")
+            print(f"  {mark} {st.bold(label)}{st.dim('  ' + detail) if detail else ''}")
+        else:
+            print(f"{'ok  ' if good else 'FAIL'} {label}{': ' + detail if detail else ''}")
 
     line(bool(shutil.which("git")), "git")
     oc = find_opencode(cfg)
@@ -153,6 +161,8 @@ def doctor(cfg):
             line(False, "model known to OpenCode", str(e))
     reason = check_model(cfg)
     line(reason is None, "model answers", reason or cfg["model"])
+    if st.on:
+        print("\n  " + (st.green("Ready to delegate.") if ok else st.red("Not ready yet.")) + "\n")
     return 0 if ok else EXIT_NOT_READY
 
 
@@ -227,8 +237,19 @@ def stats(cfg):
         return 0
     green = sum(1 for r in runs if r["exit"] == EXIT_GREEN)
     secs = sum(r["seconds"] for r in runs)
+    st = Style(sys.stdout)
+    attempts = sum(r["attempts"] for r in runs) / len(runs)
+    if st.on:
+        filled = round(20 * green / len(runs))
+        print(f"\n  {st.bold('runs')} {len(runs)}   {st.green('█' * filled)}{st.dim('░' * (20 - filled))} {st.green(str(green) + ' green')}")
+        print(st.dim(f"  agent time {secs / 60:.0f} min · {secs / len(runs):.0f} s per run · {attempts:.1f} attempts per run") + "\n")
+        for r in runs[-10:]:
+            mark = st.green("✔") if r["exit"] == EXIT_GREEN else st.red("✘")
+            print(f"  {mark} {st.dim(r['time'][:10])} {r['seconds']:>5}s {st.dim(str(r['attempts']) + 'x')} {r['task'][:60]}")
+        print()
+        return 0
     print(f"runs: {len(runs)} | tests green: {green} | agent time: {secs / 60:.0f} min | "
-          f"mean per run: {secs / len(runs):.0f} s | mean attempts: {sum(r['attempts'] for r in runs) / len(runs):.1f}")
+          f"mean per run: {secs / len(runs):.0f} s | mean attempts: {attempts:.1f}")
     for r in runs[-10:]:
         print(f"{r['time'][:16]} exit {r['exit']} {r['seconds']:>5}s {r['attempts']}x {r['task'][:60]}")
     return 0
@@ -293,7 +314,7 @@ def usage(env=None):
     return 0
 
 
-def run_agent(oc, model, wt, prompt, env, timeout, t0, quiet, stuck_repeats=0):
+def run_agent(oc, model, wt, prompt, env, timeout, progress, stuck_repeats=0):
     """Run one agent attempt in its own process group and stream progress.
 
     Returns (output, status) with status None, "timeout", or "stuck" when the same step
@@ -312,8 +333,7 @@ def run_agent(oc, model, wt, prompt, env, timeout, t0, quiet, stuck_repeats=0):
             lines.append(line)
             if not PROGRESS.match(line):
                 continue
-            if not quiet:
-                print(f"[{time.time() - t0:5.0f}s] {line[:110]}", file=sys.stderr, flush=True)
+            progress.step(line)
             if line.startswith("←"):
                 seen.clear()
                 continue
@@ -427,21 +447,23 @@ def delegate(a, cfg):
     base_prompt = task_prompt(a.task, a.test)
     prompt = base_prompt
     t0 = time.time()
+    progress = Progress(a.quiet)
+    progress.banner(__version__)
+    progress.start()
     out, attempts, status, last = "", 0, None, ""
     while True:
         attempts += 1
-        if not a.quiet:
-            print(f"[{time.time() - t0:5.0f}s] attempt {attempts}/{a.retries + 1}", file=sys.stderr, flush=True)
-        last, status = run_agent(oc, cfg["model"], wt, prompt, env, a.timeout, t0, a.quiet, cfg["stuck_repeats"])
+        progress.note(f"attempt {attempts}/{a.retries + 1}")
+        last, status = run_agent(oc, cfg["model"], wt, prompt, env, a.timeout, progress, cfg["stuck_repeats"])
         out += f"\n===== attempt {attempts} =====\n" + last + (f"\n{status.upper()}" if status else "")
-        if not a.quiet and status:
-            print(f"[{time.time() - t0:5.0f}s] attempt stopped: {status}", file=sys.stderr, flush=True)
+        if status:
+            progress.note(f"attempt stopped: {status}", "warn")
         if status is None and re.search(r"^\s*MISSING:", last, re.M):
             break
         changed_now = has_changes(wt)
         code, test_out = (0, "") if not a.test else run_tests(a.test, wt, env, cfg["test_timeout"])
-        if not a.quiet and a.test:
-            print(f"[{time.time() - t0:5.0f}s] tests {'green' if code == 0 else 'red'}", file=sys.stderr, flush=True)
+        if a.test:
+            progress.note(f"tests {'green' if code == 0 else 'red'}", "good" if code == 0 else "bad")
         if code == 0 and (changed_now or a.test):
             status = None  # the work is done even if the agent had to be stopped
             break
@@ -458,6 +480,7 @@ def delegate(a, cfg):
                       f"Fix the code (do not weaken tests). Test output (last lines):\n{tail}")
         else:
             prompt = base_prompt + "\n\nYour previous attempt changed no files. Do the work now, without asking anything."
+    progress.stop()
     secs = time.time() - t0
 
     logs = os.path.join(cfg["home"], "logs")
@@ -498,6 +521,18 @@ def delegate(a, cfg):
     steps = (f"read {len(re.findall(r'^→ Read', out, re.M))}, searched {len(re.findall(r'^✱ ', out, re.M))}, "
              f"edited {len(re.findall(r'^← ', out, re.M))}, commands {len(re.findall(r'^[$] ', out, re.M))}")
     final = [l for l in last.strip().splitlines() if l.strip() and not NOISE.match(l)][-6:]
+
+    st = Style(sys.stdout)
+    if st.on:
+        facts = {"Tests": test_line, "Time": f"{secs:.0f} s, {attempts} attempt{'s' if attempts != 1 else ''}", "Branch": branch,
+                 "Steps": steps, "Log": log}
+        if dirty:
+            facts["Note"] = "uncommitted changes are NOT in the worktree"
+        if forbidden:
+            facts["Forbidden"] = ", ".join(forbidden)
+        print(report_card(st, code, facts, stat if changed else "", final,
+                          f"git -C {repo} merge {branch}", f"qdelegate clean {repo} {branch}"))
+        return code
 
     print(f"== qdelegate | {secs:.0f}s | branch {branch} (base {base}) ==")
     print(f"Worktree: {wt}\nLog: {log}")

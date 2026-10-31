@@ -138,6 +138,25 @@ class Progress:
                 self.status = f"{label.strip()} {clip(text, 40)}"
                 return
 
+    def detail(self, line):
+        """Show the model's thinking or text, for --verbose."""
+        if not line.strip() or line.startswith("> "):
+            return
+        if not self.style.on:
+            self.write(f"[{self.stamp()}]   {line[:300]}")
+            return
+        prefix = " " * 9
+        if line.startswith("Thinking:"):
+            text = line[len("Thinking:"):].strip()
+            label = self.style.violet("think") + "  "
+            self.status = "think " + clip(text, 40)
+        else:
+            text, label = line, " " * 7
+        paint = self.style.green if line.startswith("+") else self.style.red if line.startswith("-") else self.style.dim
+        limit = shutil_columns() - 18
+        for i, piece in enumerate(chunks(text, limit)):
+            self.write("  " + prefix + (label if i == 0 else " " * 7) + paint(piece))
+
     def note(self, text, kind="note"):
         """Show a qdelegate event such as a new attempt or a test result."""
         if not self.style.on:

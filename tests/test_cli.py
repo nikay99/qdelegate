@@ -26,6 +26,8 @@ n = sum(1 for _ in open(os.environ["FAKE_LOG"]))
 steps = os.environ["FAKE_SCRIPT"].split(",")
 step = steps[min(n - 1, len(steps) - 1)]
 print("→ Read file.txt", flush=True)
+if "--thinking" in sys.argv:
+    print("Thinking: the file looks broken", flush=True)
 if step == "fix":
     open(os.path.join(wt, "file.txt"), "w").write("fixed\n"); print("← Edit file.txt\nDone.")
 elif step == "ask":
@@ -284,6 +286,24 @@ class DelegateCmdTest(unittest.TestCase):
         for cmd in ("qdelegate stats", "qdelegate clean r b", "qdelegate --version", "cd ~/code/qdelegate && ls", "grep qdelegate file",
                     "git -C r merge qdelegate/x"):
             self.assertFalse(DELEGATE_CMD.search(cmd), cmd)
+
+
+class VerboseTest(CliBase):
+    def test_verbose_shows_thinking_live(self):
+        r = self.cli("fix", self.repo, "fix it", "--test", TEST_CMD, "--verbose")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Thinking: the file looks broken", r.stderr)
+        self.assertNotIn("Thinking:", r.stdout)
+
+    def test_default_hides_thinking(self):
+        r = self.cli("fix", self.repo, "fix it", "--test", TEST_CMD)
+        self.assertNotIn("Thinking", r.stderr + r.stdout)
+
+    def test_verbose_in_color(self):
+        r = self.cli("fix", self.repo, "fix it", "--test", TEST_CMD, "--verbose", FORCE_COLOR="1")
+        self.assertIn("think", r.stderr)
+        self.assertIn("the file looks broken", r.stderr)
+        self.assertNotIn("Thinking:", r.stdout)
 
 
 class FancyTest(CliBase):

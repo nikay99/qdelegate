@@ -314,13 +314,14 @@ def usage(env=None):
     return 0
 
 
-def run_agent(oc, model, wt, prompt, env, timeout, progress, stuck_repeats=0):
+def run_agent(oc, model, wt, prompt, env, timeout, progress, stuck_repeats=0, verbose=False):
     """Run one agent attempt in its own process group and stream progress.
 
     Returns (output, status) with status None, "timeout", or "stuck" when the same step
     repeated stuck_repeats times without a successful edit in between.
     """
-    proc = subprocess.Popen([oc, "run", "-m", model, "--dir", wt, prompt], cwd=wt, env=env, text=True, errors="replace",
+    extra = ["--thinking"] if verbose else []
+    proc = subprocess.Popen([oc, "run", "-m", model, "--dir", wt, *extra, prompt], cwd=wt, env=env, text=True, errors="replace",
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             start_new_session=True)
     lines = []
@@ -332,6 +333,8 @@ def run_agent(oc, model, wt, prompt, env, timeout, progress, stuck_repeats=0):
             line = ANSI.sub("", raw.rstrip("\n"))
             lines.append(line)
             if not PROGRESS.match(line):
+                if verbose:
+                    progress.detail(line)
                 continue
             progress.step(line)
             if line.startswith("←"):
@@ -396,6 +399,7 @@ def parse_args(argv, cfg):
     ap.add_argument("--timeout", type=int, default=cfg["timeout"], help="seconds per attempt")
     ap.add_argument("--retries", type=int, default=cfg["retries"], help="extra attempts on red tests or no changes")
     ap.add_argument("--quiet", action="store_true", help="no live progress on stderr")
+    ap.add_argument("--verbose", action="store_true", help="also show the model's thinking and text while it works")
     return ap.parse_args(argv)
 
 
@@ -454,7 +458,7 @@ def delegate(a, cfg):
     while True:
         attempts += 1
         progress.note(f"attempt {attempts}/{a.retries + 1}")
-        last, status = run_agent(oc, cfg["model"], wt, prompt, env, a.timeout, progress, cfg["stuck_repeats"])
+        last, status = run_agent(oc, cfg["model"], wt, prompt, env, a.timeout, progress, cfg["stuck_repeats"], a.verbose)
         out += f"\n===== attempt {attempts} =====\n" + last + (f"\n{status.upper()}" if status else "")
         if status:
             progress.note(f"attempt stopped: {status}", "warn")
@@ -520,7 +524,7 @@ def delegate(a, cfg):
     stat = git(wt, "diff", "--stat", f"{base}..HEAD").stdout.strip() if changed else "(no changes)"
     steps = (f"read {len(re.findall(r'^→ Read', out, re.M))}, searched {len(re.findall(r'^✱ ', out, re.M))}, "
              f"edited {len(re.findall(r'^← ', out, re.M))}, commands {len(re.findall(r'^[$] ', out, re.M))}")
-    final = [l for l in last.strip().splitlines() if l.strip() and not NOISE.match(l)][-6:]
+    final = [l for l in last.strip().splitlines() if l.strip() and not NOISE.match(l) and not l.startswith("Thinking:")][-6:]
 
     st = Style(sys.stdout)
     if st.on:

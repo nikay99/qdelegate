@@ -95,6 +95,7 @@ qdelegate clean ./repo qdelegate/parse-tz-1031-120000
 | `--timeout <s>` | Seconds per attempt |
 | `--retries <n>` | Extra attempts |
 | `--quiet` | No live progress |
+| `--verbose` | Also show the model's thinking and text while it works, block by block |
 
 ## Terminal output
 

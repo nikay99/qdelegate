@@ -96,6 +96,10 @@ qdelegate clean ./repo qdelegate/parse-tz-1031-120000
 | `--retries <n>` | Extra attempts |
 | `--quiet` | No live progress |
 
+## Terminal output
+
+When connected to a terminal, qdelegate draws a colored logo with a gradient that steps through ANSI colours, a spinner animation while the agent works, and a rounded result card showing the exit status, facts, diffstat, agent notes, merge and discard commands. The card wraps long values inside the box at the available width so nothing is lost. When output is not a terminal, or when NO_COLOR is set, all rendering falls back to plain text. Set FORCE_COLOR to force colours even on non-terminals, and use --quiet to skip the live progress display.
+
 Other commands:
 
 | Command | Meaning |

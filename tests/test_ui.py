@@ -13,13 +13,16 @@ LONG_PATH = "/Users/someone/.qdelegate/logs/" + "very-long-folder-name/" * 6 + "
 LONG_STEPS = "read 18, searched 7, edited 13, commands 18, and some more text at the end of this line"
 
 
-def card(columns=60):
+def raw_card(columns=60, merge="git -C /r merge b"):
     style = Style(sys.stdout)
     style.on = True
     with mock.patch.dict(os.environ, {"COLUMNS": str(columns)}):
-        return ANSI.sub("", report_card(style, 0, {"Tests": "GREEN", "Steps": LONG_STEPS, "Log": LONG_PATH},
-                                        "f.py | 3 ++-\n 1 file changed", ["done"],
-                                        "git -C /r merge b", "qdelegate clean /r b"))
+        return report_card(style, 0, {"Tests": "GREEN", "Steps": LONG_STEPS, "Log": LONG_PATH},
+                           "f.py | 3 ++-\n 1 file changed", ["done"], merge, "qdelegate clean /r b")
+
+
+def card(columns=60):
+    return ANSI.sub("", raw_card(columns))
 
 
 class CardTest(unittest.TestCase):
@@ -53,6 +56,17 @@ class CardTest(unittest.TestCase):
         merge = next(l for l in text.splitlines() if "git -C" in l)
         discard = next(l for l in text.splitlines() if "qdelegate clean" in l)
         self.assertEqual(merge.index("git -C"), discard.index("qdelegate clean"))
+
+
+    def test_color_codes_stay_intact(self):
+        long_merge = "git -C " + LONG_PATH + " merge b"
+        for columns in (50, 100):
+            text = ANSI.sub("", raw_card(columns, long_merge))
+            self.assertNotIn("\x1b", text)
+            self.assertNotIn("[38;5", text)
+            self.assertIn(LONG_PATH.replace("/", ""), re.sub(r"[\s/]", "", text))
+            for line in text.splitlines():
+                self.assertLessEqual(width(line), columns, line)
 
 
 class ReadmeTest(unittest.TestCase):

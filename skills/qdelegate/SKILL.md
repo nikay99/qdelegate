@@ -40,4 +40,8 @@ Read only the report and the diff, not the whole repo. The exit code tells you w
 | 6 | Nothing changed: sharpen the brief |
 | 7 | The model reports something is missing: check it, it may be right |
 
+**Don't wait for a small fix.** If only a small failure is left and you can fix it in moments, stop the run, take the partial diff and finish it yourself. Waiting is only worth it while the model is doing real work.
+
+**Green tests are not a review.** Read the diff: a local model can pass the test with code that breaks in cases the test does not cover.
+
 Discard failed attempts with `qdelegate clean <repo> <branch>`. Never push or merge on your own.

@@ -53,6 +53,18 @@ def clock(seconds):
     return f"{int(seconds) // 60:02d}:{int(seconds) % 60:02d}"
 
 
+def chunks(text, limit):
+    """Split plain text into pieces of at most limit characters, at spaces when possible."""
+    limit = max(limit, 1)
+    out = []
+    while len(text) > limit:
+        cut = text.rfind(" ", 1, limit + 1)
+        cut = cut if cut > 0 else limit
+        out.append(text[:cut])
+        text = text[cut:].lstrip(" ")
+    return out + [text]
+
+
 def logo(style, version):
     tag = style.dim(f"local model · isolated worktree · tests you can trust · v{version}")
     return "\n".join(["", *("  " + style.gradient(l) for l in LOGO), "  " + tag, ""])
@@ -193,19 +205,27 @@ def report_card(style, code, facts, stat, agent_text, merge, discard):
     if code == 1 and facts.get("Tests", "") == "no test command given":
         color, icon, title = "yellow", "▲", "Finished, but no test command was given"
     paint = getattr(style, color)
+    columns = shutil_columns()
+    inner = columns - 4
     lines = [paint(style.bold(f"{icon} {title}")), ""]
     for key, value in facts.items():
-        lines.append(style.dim(f"{key:<9}") + value)
+        pieces = chunks(value, inner - 9)
+        lines.append(style.dim(f"{key:<9}") + pieces[0])
+        lines.extend(" " * 9 + piece for piece in pieces[1:])
     if stat:
         lines.append("")
-        lines.extend(diffstat(style, stat))
-    columns = shutil_columns() - 8
-    lines = [line if width(line) <= columns else clip(ANSI.sub("", line), columns) for line in lines]
+        for plain, colored in zip(stat.splitlines(), diffstat(style, stat)):
+            lines.extend([colored] if width(colored) <= inner else chunks(plain.strip(), inner))
     out = ["", box(style, lines, border=paint)]
     if agent_text:
         out += ["", "  " + style.dim("agent says")]
-        out += ["  " + style.dim("│ ") + clip(l, columns) for l in agent_text]
+        for text in agent_text:
+            out += ["  " + style.dim("│ ") + piece for piece in chunks(text, columns - 4)]
     if merge:
-        out += ["", "  " + style.green("merge  ") + merge, "  " + style.red("discard ") + discard]
+        out.append("")
+        for label, paint_label, command in (("merge", style.green, merge), ("discard", style.red, discard)):
+            pieces = chunks(command, columns - 10)
+            out.append("  " + paint_label(f"{label:<8}") + pieces[0])
+            out.extend(" " * 10 + piece for piece in pieces[1:])
     out.append("")
     return "\n".join(out)

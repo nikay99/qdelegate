@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qdelegate"
+description = "Delegate well-specified coding tasks to a local model in an isolated git worktree, with tests rerun independently."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dynamic = ["version"]
+dependencies = []
+
+[project.scripts]
+qdelegate = "qdelegate.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "qdelegate.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

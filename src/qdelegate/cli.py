@@ -50,6 +50,8 @@ RULES = (
     "\n\nRules for this job:\n"
     "- Nobody will answer questions. Do not stop to ask for clarification. Keep working until the task is done, "
     "also after a context summary.\n"
+    "- All the code you need is in the current directory. Do not read or search outside it. "
+    "Paths outside it in a command are tools to run, not code to look at.\n"
     "- Read the spec/README and all relevant files completely before editing.\n"
     "- First check with Glob/Read that everything you rely on (files, functions, config) really exists in the project. "
     "If something is missing, stop, change no files and report exactly what is missing; "
@@ -184,6 +186,26 @@ def prepare_deps(wt, env, cfg):
     if s.returncode != 0 or not os.path.isdir(dest):
         return "npm install failed: " + (s.stdout + s.stderr)[-400:]
     return clone(dest, cache)
+
+
+def copy_ignored(repo, wt, deny, max_bytes=1_000_000, max_files=200):
+    """Copy small git-ignored files, such as generated version files, that tests may need. Never denied files."""
+    skip_dirs = {"node_modules", ".venv", "venv", "__pycache__", ".git", "dist", "build", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+    out = git(repo, "ls-files", "-z", "--others", "--ignored", "--exclude-standard").stdout
+    copied = 0
+    for rel in filter(None, out.split("\0")):
+        src = os.path.join(repo, rel)
+        if skip_dirs & set(rel.split("/")) or os.path.islink(src) or not os.path.isfile(src):
+            continue
+        if any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(os.path.basename(rel), p) for p in deny):
+            continue
+        if os.path.getsize(src) > max_bytes or copied >= max_files:
+            continue
+        dst = os.path.join(wt, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        copied += 1
+    return copied
 
 
 def clean(cfg, repo, branch):
@@ -349,6 +371,7 @@ def parse_args(argv, cfg):
     ap.add_argument("task")
     ap.add_argument("--test", help="test command, rerun independently after the agent finishes")
     ap.add_argument("--setup", default="auto", help="command to run in the worktree first; 'auto' clones node_modules from a cache, 'none' skips")
+    ap.add_argument("--no-ignored", action="store_true", help="do not copy small git-ignored files into the worktree")
     ap.add_argument("--name", default="task", help="short name used in the branch")
     ap.add_argument("--timeout", type=int, default=cfg["timeout"], help="seconds per attempt")
     ap.add_argument("--retries", type=int, default=cfg["retries"], help="extra attempts on red tests or no changes")
@@ -397,6 +420,9 @@ def delegate(a, cfg):
         if s.returncode != 0:
             return abort("setup failed:\n" + (s.stdout + s.stderr)[-600:])
         git(wt, "checkout", "--", ".")  # drop lockfile changes made by setup
+
+    if not a.no_ignored:
+        copy_ignored(repo, wt, cfg["deny"])
 
     base_prompt = task_prompt(a.task, a.test)
     prompt = base_prompt
@@ -449,7 +475,7 @@ def delegate(a, cfg):
 
     test_line = "no test command given"
     code = EXIT_RED
-    if a.test and not status:
+    if a.test:
         rc, test_out = run_tests(a.test, wt, env, cfg["test_timeout"])
         tail = [l for l in test_out.splitlines() if re.search(r"(pass|fail|passed|failed|Tests?:)", l, re.I)][-3:]
         test_line = ("GREEN" if rc == 0 else "RED") + f" (exit {rc}) " + " | ".join(x.strip() for x in tail) + f" | attempts: {attempts}"

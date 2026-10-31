@@ -122,6 +122,7 @@ class CliTest(unittest.TestCase):
     def test_no_questions_rule_is_in_prompt(self):
         self.cli("fix", self.repo, "fix it", "--test", TEST_CMD)
         self.assertIn("Nobody will answer questions", self.prompts()[0])
+        self.assertIn("Do not read or search outside it", self.prompts()[0])
 
     def test_red_test_retries_with_output(self):
         r = self.cli("ask,fix", self.repo, "fix it", "--test", "cat file.txt; " + TEST_CMD)
@@ -173,6 +174,7 @@ class CliTest(unittest.TestCase):
         r = self.cli("loop", self.repo, "fix it", "--test", TEST_CMD)
         self.assertEqual(r.returncode, 4, r.stdout)
         self.assertIn("kept repeating", r.stdout)
+        self.assertIn("Tests (rerun independently): RED", r.stdout)
 
     def test_successful_edits_reset_the_stuck_counter(self):
         r = self.cli("editloop", self.repo, "fix it", "--test", TEST_CMD, QDELEGATE_STUCK_REPEATS="3")
@@ -195,6 +197,23 @@ class CliTest(unittest.TestCase):
         files = subprocess.run(["git", "-C", self.repo, "ls-tree", "-r", "--name-only", self.branch()],
                                capture_output=True, text=True).stdout
         self.assertNotIn("node_modules", files)
+
+    def test_ignored_files_are_copied_except_denied_ones(self):
+        with open(os.path.join(self.repo, ".gitignore"), "w") as fh:
+            fh.write("_version.py\n.env\n")
+        subprocess.run(["git", "-C", self.repo, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.repo, "commit", "-qm", "ignore"], check=True)
+        for name in ("_version.py", ".env"):
+            with open(os.path.join(self.repo, name), "w") as fh:
+                fh.write("x\n")
+        test = "test -f _version.py && test ! -f .env && " + TEST_CMD
+        r = self.cli("fix", self.repo, "fix it", "--test", test)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        files = subprocess.run(["git", "-C", self.repo, "ls-tree", "-r", "--name-only", self.branch()],
+                               capture_output=True, text=True).stdout
+        self.assertNotIn("_version.py", files)  # stays ignored, never committed
+        r = self.cli("fix", self.repo, "fix it", "--test", test, "--no-ignored", "--name", "b", "--retries", "0")
+        self.assertEqual(r.returncode, 1, r.stdout)
 
     def test_model_not_ready_is_exit_2_and_leaves_no_branch(self):
         r = self.cli("fix", self.repo, "fix it", port=1)

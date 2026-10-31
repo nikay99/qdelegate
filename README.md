@@ -14,6 +14,8 @@ Built for a setup where Claude Code (or you) writes a short brief and an accepta
 - Treats "changed nothing" as a failure and retries, because local models sometimes stop to ask a question nobody will answer.
 - Lets the agent stop with `MISSING:` instead of inventing a file that does not exist.
 - Flags changes to `.env`, keys and CI workflows.
+- Copies small git-ignored files, such as generated version files, into the worktree, because tests may need them. Denied patterns like `.env` are never copied. `--no-ignored` turns this off.
+- Stops an attempt that keeps repeating the same step, and retries after a timeout with the edits kept.
 - Logs every run to `~/.qdelegate/runs.jsonl`.
 
 ## Install
@@ -96,7 +98,7 @@ Small tests on one Mac with 32 GB and one model (Qwen3.6-35B-A3B), on 8 real fix
 | pi, Claude's brief plus acceptance test, 600 s limit | 6/8 |
 | pi, same, 1200 s limit | 7/8 |
 
-The brief and the test mattered more than the choice of agent. An acceptance test that missed an edge case let a wrong fix pass. The "no questions" rule and the retry on no changes are not measured yet. Weaker hardware is untested.
+The brief and the test mattered more than the choice of agent. An acceptance test that missed an edge case let a wrong fix pass. The "no questions" rule and the retry on no changes are not measured on their own. Weaker hardware is untested.
 
 ## Tests
 

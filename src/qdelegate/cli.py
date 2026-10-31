@@ -3,13 +3,14 @@
   qdelegate <repo> "<task>" --test "npm test" [--setup auto|none|<cmd>] [--name slug]
   qdelegate doctor                  check git, OpenCode, server and model
   qdelegate stats                   summarize the local run log
+  qdelegate usage                   Claude tokens in sessions that delegated
   qdelegate clean <repo> <branch>   remove a worktree and its branch
 
 Flow: health check -> worktree and new branch from HEAD -> agent works -> commit on the branch
       -> tests rerun independently of what the agent claims -> short report.
 It never pushes and never writes to your checked-out branch. Merge the branch yourself after review.
 
-Exit codes: 0 tests green, 1 tests red or no test command, 2 model not ready, 3 error, 4 timeout,
+Exit codes: 0 tests green, 1 tests red or no test command, 2 model not ready, 3 error, 4 timeout or stuck agent,
             5 forbidden files changed, 6 agent changed nothing, 7 agent reported MISSING.
 """
 import argparse
@@ -37,6 +38,7 @@ DEFAULTS = {
     "timeout": 900,
     "test_timeout": 600,
     "retries": 1,
+    "stuck_repeats": 5,
     "deny": [".env", ".env.*", "*.pem", "*.key", "*secret*", ".github/*", "*.p12"],
     "branch_prefix": "qdelegate",
     "opencode": "",
@@ -60,6 +62,8 @@ RULES = (
 )
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PROGRESS = re.compile(r"^(→|✱|←|\$ |✗|•|Error)")
+DELEGATE_CMD = re.compile(  # a command that starts a task, not a path, a subcommand or a mention
+    r"(?:^|[;&|\n])\s*(?:\S*/)?(?:\S+ -m )?qdelegate\s+(?!doctor\b|stats\b|usage\b|clean\b|-)\S", re.M)
 NOISE = re.compile(
     r"^\s*(#|ok \d|not ok|---|\.\.\.|\d+\.\.\d+|duration_ms|type:|TAP version|>|\$ |[→✱←•✗]|[+-]{1,3}\s|@@|diff |index |Index:"
     r"|={5,}|RUN\s+v|Test Files|Tests\s|Start at|Duration|\s*(it|describe|expect|import|const|let|vi\.|\}|\)|\]))"
@@ -208,27 +212,106 @@ def stats(cfg):
     return 0
 
 
-def run_agent(oc, model, wt, prompt, env, timeout, t0, quiet):
-    """Run one agent attempt in its own process group and stream progress. Returns (output, timed_out)."""
+def scan_transcript(path):
+    """Sum token usage of one Claude Code transcript and count qdelegate task runs in it."""
+    totals = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
+    delegations, seen, last = 0, set(), ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if '"usage"' not in line and "qdelegate" not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            m = d.get("message")
+            if not isinstance(m, dict):
+                continue
+            last = d.get("timestamp", last)
+            u = m.get("usage")
+            if u and m.get("id") not in seen:  # one API message spans several transcript lines
+                seen.add(m.get("id"))
+                totals["input"] += u.get("input_tokens", 0)
+                totals["cache_write"] += u.get("cache_creation_input_tokens", 0)
+                totals["cache_read"] += u.get("cache_read_input_tokens", 0)
+                totals["output"] += u.get("output_tokens", 0)
+            content = m.get("content")
+            for c in content if isinstance(content, list) else []:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    cmd = str((c.get("input") or {}).get("command", ""))
+                    if DELEGATE_CMD.search(cmd):
+                        delegations += 1
+    return totals, delegations, last
+
+
+def usage(env=None):
+    """Report Claude tokens per session that delegated. Rough: a session also holds unrelated work."""
+    env = os.environ if env is None else env
+    base = env.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+    rows = []
+    for dp, dn, fn in os.walk(os.path.join(base, "projects")):
+        dn[:] = [x for x in dn if x != "subagents"]
+        for f in fn:
+            if f.endswith(".jsonl"):
+                totals, n, last = scan_transcript(os.path.join(dp, f))
+                if n:
+                    rows.append((last, os.path.basename(dp)[-28:], n, totals))
+    if not rows:
+        print("no Claude Code sessions with qdelegate runs found")
+        return 0
+    rows.sort(key=lambda r: r[0])
+    print("Claude tokens in sessions that delegated. New = input + cache writes + output; cache reads are listed apart.")
+    print("A session also holds unrelated work, so this is an upper bound per delegation, not a saving.")
+    for last, name, n, t in rows[-15:]:
+        new = t["input"] + t["cache_write"] + t["output"]
+        print(f"{last[:10]} {name:<28} delegations {n:>3} | new {new:>10,} | cache read {t['cache_read']:>12,} | new per delegation {new // n:>9,}")
+    n = sum(r[2] for r in rows)
+    new = sum(r[3]["input"] + r[3]["cache_write"] + r[3]["output"] for r in rows)
+    print(f"total: {len(rows)} sessions, {n} delegations, {new:,} new tokens, {new // n:,} per delegation")
+    return 0
+
+
+def run_agent(oc, model, wt, prompt, env, timeout, t0, quiet, stuck_repeats=0):
+    """Run one agent attempt in its own process group and stream progress.
+
+    Returns (output, status) with status None, "timeout", or "stuck" when the same step
+    repeated stuck_repeats times without a successful edit in between.
+    """
     proc = subprocess.Popen([oc, "run", "-m", model, "--dir", wt, prompt], cwd=wt, env=env, text=True, errors="replace",
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             start_new_session=True)
     lines = []
+    stuck = threading.Event()
+    seen = {}
 
     def reader():
         for raw in proc.stdout:
             line = ANSI.sub("", raw.rstrip("\n"))
             lines.append(line)
-            if not quiet and PROGRESS.match(line):
+            if not PROGRESS.match(line):
+                continue
+            if not quiet:
                 print(f"[{time.time() - t0:5.0f}s] {line[:110]}", file=sys.stderr, flush=True)
+            if line.startswith("←"):
+                seen.clear()
+                continue
+            seen[line] = seen.get(line, 0) + 1
+            if stuck_repeats and seen[line] >= stuck_repeats:
+                stuck.set()
 
     th = threading.Thread(target=reader, daemon=True)
     th.start()
-    timed_out = False
+    status = None
+    deadline = time.time() + timeout
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
+        while proc.poll() is None:
+            if stuck.is_set():
+                status = "stuck"
+                break
+            if time.time() >= deadline:
+                status = "timeout"
+                break
+            time.sleep(0.2)
     finally:
         try:
             os.killpg(proc.pid, signal.SIGKILL)  # also ends stuck children such as watch modes and servers
@@ -236,7 +319,7 @@ def run_agent(oc, model, wt, prompt, env, timeout, t0, quiet):
             pass
         proc.wait()
     th.join(timeout=5)
-    return "\n".join(lines), timed_out
+    return "\n".join(lines), status
 
 
 def has_changes(wt):
@@ -261,7 +344,7 @@ def task_prompt(task, test_cmd):
 
 def parse_args(argv, cfg):
     ap = argparse.ArgumentParser(prog="qdelegate", description="Hand a task to a local model in an isolated git worktree. "
-                                 "Other commands: doctor, stats, clean <repo> <branch>.")
+                                 "Other commands: doctor, stats, usage, clean <repo> <branch>.")
     ap.add_argument("repo")
     ap.add_argument("task")
     ap.add_argument("--test", help="test command, rerun independently after the agent finishes")
@@ -318,24 +401,32 @@ def delegate(a, cfg):
     base_prompt = task_prompt(a.task, a.test)
     prompt = base_prompt
     t0 = time.time()
-    out, attempts, timed_out, last = "", 0, False, ""
+    out, attempts, status, last = "", 0, None, ""
     while True:
         attempts += 1
         if not a.quiet:
             print(f"[{time.time() - t0:5.0f}s] attempt {attempts}/{a.retries + 1}", file=sys.stderr, flush=True)
-        last, timed_out = run_agent(oc, cfg["model"], wt, prompt, env, a.timeout, t0, a.quiet)
-        out += f"\n===== attempt {attempts} =====\n" + last + ("\nTIMEOUT" if timed_out else "")
-        if timed_out or re.search(r"^\s*MISSING:", last, re.M):
+        last, status = run_agent(oc, cfg["model"], wt, prompt, env, a.timeout, t0, a.quiet, cfg["stuck_repeats"])
+        out += f"\n===== attempt {attempts} =====\n" + last + (f"\n{status.upper()}" if status else "")
+        if not a.quiet and status:
+            print(f"[{time.time() - t0:5.0f}s] attempt stopped: {status}", file=sys.stderr, flush=True)
+        if status is None and re.search(r"^\s*MISSING:", last, re.M):
             break
         changed_now = has_changes(wt)
         code, test_out = (0, "") if not a.test else run_tests(a.test, wt, env, cfg["test_timeout"])
         if not a.quiet and a.test:
             print(f"[{time.time() - t0:5.0f}s] tests {'green' if code == 0 else 'red'}", file=sys.stderr, flush=True)
         if code == 0 and (changed_now or a.test):
+            status = None  # the work is done even if the agent had to be stopped
             break
         if attempts > a.retries:
             break
-        if code != 0:
+        if status:
+            tail = "\n".join(test_out.strip().splitlines()[-40:])
+            prompt = (base_prompt + f"\n\nYour previous attempt was stopped ({status}): it kept repeating the same steps or ran out of time. "
+                      "Your edits so far are in the working tree. Check them with `git diff`, then try a different approach. "
+                      "Read only the parts of files you need." + (f"\nTest output (last lines):\n{tail}" if tail else ""))
+        elif code != 0:
             tail = "\n".join(test_out.strip().splitlines()[-60:])
             prompt = (base_prompt + f"\n\nYour previous attempt is not finished: `{a.test}` still fails. "
                       f"Fix the code (do not weaken tests). Test output (last lines):\n{tail}")
@@ -358,16 +449,16 @@ def delegate(a, cfg):
 
     test_line = "no test command given"
     code = EXIT_RED
-    if a.test and not timed_out:
+    if a.test and not status:
         rc, test_out = run_tests(a.test, wt, env, cfg["test_timeout"])
         tail = [l for l in test_out.splitlines() if re.search(r"(pass|fail|passed|failed|Tests?:)", l, re.I)][-3:]
         test_line = ("GREEN" if rc == 0 else "RED") + f" (exit {rc}) " + " | ".join(x.strip() for x in tail) + f" | attempts: {attempts}"
         code = EXIT_GREEN if rc == 0 else EXIT_RED
-    if not changed and not timed_out:
+    if not changed and not status:
         code = EXIT_MISSING if missing else EXIT_EMPTY
     if missing:
         code = EXIT_MISSING
-    if timed_out:
+    if status:
         code = EXIT_TIMEOUT
     if forbidden:
         code = EXIT_FORBIDDEN
@@ -387,8 +478,10 @@ def delegate(a, cfg):
     if dirty:
         print("Note: the repo had uncommitted changes; they are NOT in the worktree. Commit an acceptance test before delegating.")
     print(f"Tests (rerun independently): {test_line}")
-    if timed_out:
-        print(f"TIMEOUT after {a.timeout}s")
+    if status == "timeout":
+        print(f"TIMEOUT after {a.timeout}s on attempt {attempts}")
+    elif status == "stuck":
+        print(f"STOPPED: the agent kept repeating a step on attempt {attempts}")
     if forbidden:
         print("!! FORBIDDEN FILES CHANGED:", ", ".join(forbidden))
     if missing:
@@ -413,6 +506,8 @@ def main(argv=None):
         code = doctor(cfg)
     elif argv[:1] == ["stats"]:
         code = stats(cfg)
+    elif argv[:1] == ["usage"]:
+        code = usage()
     elif argv[:1] == ["clean"]:
         if len(argv) != 3:
             raise SystemExit("usage: qdelegate clean <repo> <branch>")

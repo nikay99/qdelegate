@@ -35,7 +35,7 @@ Read only the report and the diff, not the whole repo. The exit code tells you w
 | 0 | Review the diff. Green tests do not replace your review. Merge only when the user agrees |
 | 1 | Read the failure. Sharpen the brief or the test, or do it yourself |
 | 2 | Model not ready: tell the user |
-| 4 | Timed out: shrink the task or name a line range |
+| 4 | Timed out or stuck, on every attempt: shrink the task or name a line range |
 | 5 | Forbidden files changed: do not merge, tell the user |
 | 6 | Nothing changed: sharpen the brief |
 | 7 | The model reports something is missing: check it, it may be right |

@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
-from qdelegate.cli import DEFAULTS, RULES, load_config  # noqa: E402
+from qdelegate.cli import DEFAULTS, DELEGATE_CMD, RULES, load_config  # noqa: E402
 
 FAKE_OPENCODE = r"""#!/usr/bin/env python3
 # Plays one scripted step per attempt from $FAKE_SCRIPT; records prompts in $FAKE_LOG.
@@ -34,6 +34,14 @@ elif step == "missing":
     print("MISSING:\nthe spec does not exist")
 elif step == "hang":
     time.sleep(60)
+elif step == "loop":
+    for _ in range(50):
+        print("✗ Edit file.txt failed", flush=True); time.sleep(0.05)
+    time.sleep(60)
+elif step == "editloop":
+    for _ in range(4):
+        print("$ npm test", flush=True); print("← Edit file.txt", flush=True)
+    open(os.path.join(wt, "file.txt"), "w").write("fixed\n")
 elif step == "secret":
     open(os.path.join(wt, ".env"), "w").write("KEY=1\n"); print("wrote it")
 """
@@ -145,9 +153,31 @@ class CliTest(unittest.TestCase):
 
     def test_timeout_kills_agent(self):
         t0 = time.time()
-        r = self.cli("hang", self.repo, "fix it", "--test", TEST_CMD, "--timeout", "1")
+        r = self.cli("hang", self.repo, "fix it", "--test", TEST_CMD, "--timeout", "1", "--retries", "0")
         self.assertEqual(r.returncode, 4, r.stdout)
         self.assertLess(time.time() - t0, 30)
+
+    def test_timeout_retries_when_attempts_remain(self):
+        r = self.cli("hang,fix", self.repo, "fix it", "--test", TEST_CMD, "--timeout", "1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("was stopped (timeout)", self.prompts()[1])
+
+    def test_stuck_agent_is_stopped_and_retried(self):
+        t0 = time.time()
+        r = self.cli("loop,fix", self.repo, "fix it", "--test", TEST_CMD)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertLess(time.time() - t0, 30)
+        self.assertIn("was stopped (stuck)", self.prompts()[1])
+
+    def test_stuck_on_every_attempt_is_exit_4(self):
+        r = self.cli("loop", self.repo, "fix it", "--test", TEST_CMD)
+        self.assertEqual(r.returncode, 4, r.stdout)
+        self.assertIn("kept repeating", r.stdout)
+
+    def test_successful_edits_reset_the_stuck_counter(self):
+        r = self.cli("editloop", self.repo, "fix it", "--test", TEST_CMD, QDELEGATE_STUCK_REPEATS="3")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.prompts()), 1)
 
     def test_forbidden_file_is_exit_5(self):
         r = self.cli("secret", self.repo, "fix it")
@@ -202,12 +232,37 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(self.branch(), "")
 
+    def test_usage_counts_delegations_once_per_message(self):
+        base = os.path.join(self.tmp.name, "claude")
+        d = os.path.join(base, "projects", "proj")
+        os.makedirs(d)
+        msg = {"id": "m1", "usage": {"input_tokens": 10, "cache_creation_input_tokens": 20, "cache_read_input_tokens": 100, "output_tokens": 5},
+               "content": [{"type": "tool_use", "input": {"command": "qdelegate ./r 'fix' --test t"}}]}
+        other = {"id": "m2", "content": [{"type": "tool_use", "input": {"command": "qdelegate stats"}}]}
+        with open(os.path.join(d, "s.jsonl"), "w") as fh:
+            for m in (msg, msg, other):
+                fh.write(json.dumps({"timestamp": "2026-10-31T00:00:00Z", "message": m}) + "\n")
+        r = self.cli("fix", "usage", CLAUDE_CONFIG_DIR=base)
+        self.assertIn("delegations   2", r.stdout)  # counted per tool_use line
+        self.assertIn("new 35", r.stdout.replace("  ", " ").replace("  ", " ").replace("  ", " ").replace("  ", " "))
+        r = self.cli("fix", "usage", CLAUDE_CONFIG_DIR=os.path.join(self.tmp.name, "nothing"))
+        self.assertIn("no Claude Code sessions", r.stdout)
+
     def test_doctor(self):
         r = self.cli("fix", "doctor")
         self.assertEqual(r.returncode, 0, r.stdout)
         r = self.cli("fix", "doctor", QDELEGATE_MODEL="lmstudio/other")
         self.assertEqual(r.returncode, 2)
         self.assertIn("not in `opencode models`", r.stdout)
+
+
+class DelegateCmdTest(unittest.TestCase):
+    def test_matches_only_task_runs(self):
+        for cmd in ("qdelegate ./r 'x' --test t", "cd a && qdelegate ./r x", "~/.local/bin/qdelegate r x", "python3 -m qdelegate r x"):
+            self.assertTrue(DELEGATE_CMD.search(cmd), cmd)
+        for cmd in ("qdelegate stats", "qdelegate clean r b", "qdelegate --version", "cd ~/code/qdelegate && ls", "grep qdelegate file",
+                    "git -C r merge qdelegate/x"):
+            self.assertFalse(DELEGATE_CMD.search(cmd), cmd)
 
 
 class ConfigTest(unittest.TestCase):

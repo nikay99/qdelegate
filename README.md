@@ -62,7 +62,7 @@ qdelegate stats
 | 1 | Tests red, or no test command given |
 | 2 | Model or OpenCode not ready |
 | 3 | Error, for example not a git repo |
-| 4 | Timeout |
+| 4 | Timeout, or the agent kept repeating a step |
 | 5 | Forbidden files changed |
 | 6 | Agent changed nothing |
 | 7 | Agent reported `MISSING:` |
